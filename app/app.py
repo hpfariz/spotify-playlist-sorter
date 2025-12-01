@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import sys
+
+# Fix for Playwright "NotImplementedError" on Windows
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 import logging
 import os
 from pathlib import Path
@@ -249,25 +256,7 @@ def main() -> None:
 
         # Environment selection
         if "is_local_environment" not in st.session_state:
-            # Try to detect if we're running in Streamlit Cloud
-            try:
-                # Check if we're running in a Streamlit environment
-                from streamlit.runtime.scriptrunner import get_script_run_ctx
-
-                # Check for cloud deployment by looking at the URL
-                ctx = get_script_run_ctx()
-                if ctx is not None and ctx.session_id:
-                    # If we're on streamlit cloud, the URL won't be localhost
-                    is_cloud = "localhost" not in st.get_option(
-                        "server.baseUrlPath"
-                    ) and "127.0.0.1" not in st.get_option("server.baseUrlPath")
-                    st.session_state.is_local_environment = not is_cloud
-                else:
-                    # Default to True if we can't determine
-                    st.session_state.is_local_environment = True
-            except (ImportError, ModuleNotFoundError, AttributeError):
-                # If specific errors occur (import missing, module not found, attribute not available)
-                st.session_state.is_local_environment = True
+            st.session_state.is_local_environment = True
 
         is_local = st.checkbox("I'm running this app locally", value=st.session_state.is_local_environment)
         if is_local != st.session_state.is_local_environment:
@@ -738,7 +727,7 @@ def main() -> None:
             st.markdown(
                 """
                 <div class='info-box' style='background-color: rgba(29, 185, 84, 0.1); border-left: 5px solid #1DB954;'>
-                <h3 style='color: #1DB954; margin-top: 0;'>Getting Spotify API Credentials</h3>
+                <h3 style='color: #1DB954; margin-top: 0;'>Getting Spotify API Credentialss</h3>
 
                 <ol style='padding-left: 20px; margin-bottom: 0;'>
                     <li>Go to the <a href="https://developer.spotify.com/dashboard" target="_blank" style="color: #1DB954; text-decoration: underline;">Spotify Developer Dashboard</a></li>

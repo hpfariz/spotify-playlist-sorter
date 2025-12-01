@@ -5,8 +5,11 @@ requires-python = ">=3.13"
 dependencies = [
     "beautifulsoup4==4.13.3",
     "bs4>=0.0.2",
+    "cloudscraper>=1.2.71",
+    "curl-cffi>=0.13.0",
     "numpy==2.2.4",
     "pandas==2.2.3",
+    "playwright>=1.56.0",
     "plotly>=6.0.1",
     "python-dotenv==1.1.0",
     "requests==2.32.3",

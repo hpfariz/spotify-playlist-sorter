@@ -7,6 +7,7 @@ import re
 import time
 from typing import TYPE_CHECKING, Any, Optional, TypeVar, cast
 
+import cloudscraper
 import numpy as np
 import pandas as pd
 import requests
@@ -87,29 +88,65 @@ class SpotifyPlaylistSorter:
 
     def _scrape_songdata_io(self) -> pd.DataFrame | None:
         """Scrape track data from songdata.io for the playlist."""
+        from playwright.sync_api import sync_playwright
+        
         url = f"https://songdata.io/playlist/{self.playlist_id}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
         logger.info("Attempting to scrape data from: %s", url)
 
+        content = ""
         try:
-            response = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
-            response.raise_for_status()
-        except requests.exceptions.RequestException:
-            logger.exception("Failed to fetch data from songdata.io")
+            with sync_playwright() as p:
+                logger.info("Launching System Chrome...")
+                # CHANGE 1: Use channel="chrome" to use your real installed browser
+                # CHANGE 2: Add argument to start maximized
+                browser = p.chromium.launch(
+                    headless=False,
+                    channel="chrome",  # Uses actual Google Chrome (or try "msedge" if you don't have Chrome)
+                    args=["--disable-blink-features=AutomationControlled", "--start-maximized"]
+                )
+                
+                # CHANGE 3: Remove manual User-Agent and Viewport to avoid fingerprint mismatches
+                context = browser.new_context(
+                    viewport=None,  # Let the browser decide the size
+                    no_viewport=True
+                )
+                
+                page = context.new_page()
+                
+                # Stealth: Hide the webdriver property
+                page.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    })
+                """)
+                
+                logger.info("Navigating to page...")
+                page.goto(url, timeout=90000, wait_until="domcontentloaded")
+                
+                try:
+                    logger.info("Waiting for data table...")
+                    # Wait for the table to appear
+                    page.wait_for_selector("#table_chart", state="visible", timeout=30000)
+                except Exception:
+                    logger.warning("Table not detected immediately. If you see a CAPTCHA, please solve it manually.")
+                    # Wait a bit longer for manual intervention
+                    time.sleep(10)
+                
+                content = page.content()
+                browser.close()
+                
+        except Exception as e:
+            logger.exception("Failed to scrape with Playwright")
             return None
 
-        soup = BeautifulSoup(response.content, "html.parser")
-
-        # Find the table - adjust selector if songdata.io changes structure
-        # Cast to Tag type to satisfy type checker when table is found
+        # Parse the content with BeautifulSoup
+        soup = BeautifulSoup(content, "html.parser")
+        
+        # ... (Rest of the function remains exactly the same) ...
         table = cast("Optional[Tag]", soup.find("table", {"id": "table_chart"}))
         if not table:
             logger.error("Could not find the track table (id='table_chart') on the page.")
-            logger.error("The website structure might have changed.")
-            # Try finding by class as a fallback
+            # ... continue with the rest of your parsing logic ...
             table = cast("Optional[Tag]", soup.find("table", {"class": "table"}))
             if not table:
                 logger.error("Could not find the track table by class either.")
@@ -243,7 +280,7 @@ class SpotifyPlaylistSorter:
 
         logger.info("Successfully scraped and parsed %s tracks.", len(track_df))
         return track_df
-
+    
     def load_playlist(self) -> pd.DataFrame | None:
         """Load playlist name from Spotify and track data by scraping songdata.io."""
         logger.info("Loading playlist metadata for: %s", self.playlist_id)
