@@ -86,6 +86,143 @@ class SpotifyPlaylistSorter:
 
         return camelot_map
 
+    def _scrape_chosic(self) -> pd.DataFrame | None:
+        """Scrape track data from chosic.com for the playlist."""
+        from playwright.sync_api import sync_playwright
+
+        playlist_url = f"https://open.spotify.com/playlist/{self.playlist_id}"
+        chosic_url = "https://www.chosic.com/spotify-playlist-analyzer/"
+        logger.info("Attempting to scrape data from Chosic: %s for playlist %s", chosic_url, playlist_url)
+
+        content = ""
+        try:
+            with sync_playwright() as p:
+                logger.info("Launching Browser for Chosic...")
+                browser = p.chromium.launch(
+                    headless=True,  # Can be headless for server environments
+                    args=["--disable-blink-features=AutomationControlled", "--start-maximized"],
+                )
+                context = browser.new_context(
+                    viewport={"width": 1920, "height": 1080},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                )
+                page = context.new_page()
+
+                logger.info("Navigating to Chosic...")
+                page.goto(chosic_url, timeout=60000, wait_until="domcontentloaded")
+
+                # Wait for input
+                page.wait_for_selector("#search-word", state="visible", timeout=30000)
+
+                # Type playlist URL
+                logger.info("Inputting playlist URL...")
+                page.fill("#search-word", playlist_url)
+
+                # Click Analyze
+                logger.info("Clicking Analyze...")
+                page.click("#analyze")
+
+                # Wait for the results table
+                # The table ID is #tracks-table based on provided HTML
+                try:
+                    logger.info("Waiting for results table...")
+                    page.wait_for_selector("#tracks-table tbody tr", state="visible", timeout=60000)
+                    # Give it a small buffer to ensure rendering completes if it's dynamic
+                    time.sleep(2)
+                except Exception:
+                    logger.warning("Timeout waiting for results table. Attempting to grab content anyway.")
+
+                content = page.content()
+                browser.close()
+
+        except Exception as e:
+            logger.exception("Failed to scrape Chosic with Playwright")
+            return None
+
+        # Parse content
+        soup = BeautifulSoup(content, "html.parser")
+        table = soup.find("table", {"id": "tracks-table"})
+
+        if not table:
+            logger.error("Could not find #tracks-table in Chosic response.")
+            return None
+
+        table_body = table.find("tbody")
+        if not table_body:
+            logger.error("Could not find tbody in Chosic results.")
+            return None
+
+        rows = table_body.find_all("tr")
+        logger.info("Found %s track rows in Chosic table.", len(rows))
+
+        tracks = []
+        for row in rows:
+            try:
+                cols = row.find_all("td")
+                # Based on HTML provided:
+                # 0: #, 1: Song, 2: Artist, 3: Popularity, 4: BPM, ..., 11: Energy, ..., 21: Spotify Track Id, ..., 23: Camelot
+
+                if len(cols) < 24:
+                    continue
+
+                spotify_id = cols[21].text.strip()
+
+                # Track name is inside td > div > span, or sometimes just text
+                track_name_span = cols[1].find("span", class_="td-name-text")
+                if track_name_span:
+                    track_name = track_name_span.text.strip()
+                else:
+                    track_name = cols[1].text.strip()
+
+                # Remove checkbox text if caught (rare but possible depending on HTML structure)
+                if " " in track_name and len(track_name) > 1:
+                     track_name = track_name.replace("Check to delete", "").strip()
+
+                artist = cols[2].text.strip()
+                bpm = cols[4].text.strip()
+                energy = cols[11].text.strip()  # 0-100
+                camelot = cols[23].text.strip()
+                popularity = cols[3].text.strip()
+
+                if not all([spotify_id, bpm, energy, camelot]):
+                    continue
+
+                tracks.append(
+                    {
+                        "id": spotify_id,
+                        "Track": track_name,
+                        "Artist": artist,
+                        "Camelot": camelot,
+                        "BPM": bpm,
+                        "Energy": energy,  # Will normalize later
+                        "Popularity": popularity,
+                    }
+                )
+
+            except Exception as e:
+                logger.warning("Error parsing Chosic row: %s", e)
+                continue
+
+        if not tracks:
+            return None
+
+        track_df = pd.DataFrame(tracks)
+
+        # Data Cleaning
+        try:
+            track_df["BPM"] = pd.to_numeric(track_df["BPM"], errors="coerce")
+            # Normalize Energy (Chosic is 0-100, we need 0-1)
+            track_df["Energy"] = pd.to_numeric(track_df["Energy"], errors="coerce") / 100.0
+            track_df["Popularity"] = pd.to_numeric(track_df["Popularity"], errors="coerce")
+
+            # Normalize Camelot (ensure uppercase)
+            track_df["Camelot"] = track_df["Camelot"].str.upper()
+
+        except Exception:
+            logger.exception("Error processing Chosic dataframe")
+
+        return track_df
+
     def _scrape_songdata_io(self) -> pd.DataFrame | None:
         """Scrape track data from songdata.io for the playlist."""
         from playwright.sync_api import sync_playwright
@@ -281,9 +418,9 @@ class SpotifyPlaylistSorter:
         logger.info("Successfully scraped and parsed %s tracks.", len(track_df))
         return track_df
     
-    def load_playlist(self) -> pd.DataFrame | None:
-        """Load playlist name from Spotify and track data by scraping songdata.io."""
-        logger.info("Loading playlist metadata for: %s", self.playlist_id)
+    def load_playlist(self, source: str = "songdata.io") -> pd.DataFrame | None:
+        """Load playlist name from Spotify and track data by scraping."""
+        logger.info("Loading playlist metadata for: %s using %s", self.playlist_id, source)
         try:
             # Get playlist name from Spotify (more reliable than scraping)
             playlist_info = self.sp.playlist(self.playlist_id, fields="name")
@@ -293,11 +430,16 @@ class SpotifyPlaylistSorter:
             logger.warning("Failed to get playlist name from Spotify: %s. Will proceed without it.", e)
             self.playlist_name = f"Playlist {self.playlist_id}"
 
-        # Scrape track data from songdata.io
-        scraped_data = self._scrape_songdata_io()
+        # Scrape track data based on selected source
+        scraped_data = None
+        if source == "chosic.com":
+            scraped_data = self._scrape_chosic()
+        else:
+            # Default to songdata.io
+            scraped_data = self._scrape_songdata_io()
 
         if scraped_data is None or scraped_data.empty:
-            logger.error("Failed to scrape data from songdata.io. Cannot proceed.")
+            logger.error(f"Failed to scrape data from {source}. Cannot proceed.")
             self.tracks_data = pd.DataFrame()
             self.original_track_order = []
             return None
@@ -305,7 +447,7 @@ class SpotifyPlaylistSorter:
         # Store original order based on scraped table
         self.original_track_order = self.tracks_data["id"].tolist()
         logger.info(
-            "Using original track order based on songdata.io table (%s tracks).", len(self.original_track_order)
+            "Using original track order based on %s table (%s tracks).", source, len(self.original_track_order)
         )
 
         # Ensure required columns exist even if scraping missed some
@@ -331,9 +473,9 @@ class SpotifyPlaylistSorter:
 
         return self.tracks_data
 
-    def calculate_transition_score(self, track1: pd.Series, track2: pd.Series) -> float:
+    def calculate_transition_score(self, track1: pd.Series | dict[str, Any], track2: pd.Series | dict[str, Any]) -> float:
         """Calculate a transition score between two tracks based on key, BPM, and energy."""
-        # Get track data
+        # Get track data (handle both Series and dict)
         key1 = track1.get("Camelot")
         key2 = track2.get("Camelot")
         bpm1 = track1.get("BPM")
@@ -413,23 +555,49 @@ class SpotifyPlaylistSorter:
         # Key is weighted most heavily since harmonic compatibility is paramount
         return key_score * 0.5 * key_multiplier + bpm_score * 0.3 + energy_score * 0.2
 
-    def sort_playlist(self, start_track_id: str) -> list[str]:
-        """Sort the playlist using transition scores, starting from anchor."""
+    def sort_playlist(self, start_track_id: str, method: str = "greedy") -> list[str]:
+        """Sort the playlist using transition scores, starting from anchor.
+        
+        Args:
+            start_track_id: The ID of the track to start the playlist with.
+            method: The sorting algorithm to use ('greedy' or 'beam').
+        """
         if self.tracks_data is None or self.tracks_data.empty:
             logger.error("Track data is not loaded or is empty. Cannot sort.")
             return []
 
-        sortable_tracks = self.tracks_data.copy()
-
-        if start_track_id not in sortable_tracks["id"].to_numpy():
+        if start_track_id not in self.tracks_data["id"].to_numpy():
             logger.error("Start track ID '%s' not found in the loaded & filtered tracks.", start_track_id)
             if self.original_track_order and start_track_id in self.original_track_order:
                 logger.warning(
                     "Anchor track was present initially but filtered out due to missing data. Cannot use as anchor."
                 )
             return []
+            
+        logger.info("Starting sort with anchor track ID: %s using %s method", start_track_id, method)
 
-        logger.info("Starting sort with anchor track ID: %s", start_track_id)
+        if method == "beam":
+             sorted_ids = self._sort_playlist_beam(start_track_id)
+        else:
+             sorted_ids = self._sort_playlist_greedy(start_track_id)
+
+        # Handle tracks that were filtered out or not placed (e.g., in original but not in sort result)
+        original_ids_set = set(self.original_track_order) if self.original_track_order else set()
+        missing_from_sort = original_ids_set - set(sorted_ids)
+
+        if missing_from_sort and self.original_track_order:
+            logger.warning("Sort finished, but %s tracks that had data were not placed.", len(missing_from_sort))
+            missing_tracks_ordered = [tid for tid in self.original_track_order if tid in missing_from_sort]
+            logger.info("Appending %s tracks that were not placed during sorting.", len(missing_tracks_ordered))
+            sorted_ids.extend(missing_tracks_ordered)
+        
+        logger.info("Playlist sorting complete. Final track count: %s", len(sorted_ids))
+        return sorted_ids
+
+    def _sort_playlist_greedy(self, start_track_id: str) -> list[str]:
+        """Sort using a greedy algorithm: always pick best next track."""
+        sortable_tracks = self.tracks_data.copy()
+        
         current_id = start_track_id
         sorted_ids = [current_id]
         remaining_ids = set(sortable_tracks["id"].tolist())
@@ -465,7 +633,6 @@ class SpotifyPlaylistSorter:
             next_track_id = str(next_track["id"])
 
             if next_track_id not in remaining_ids:
-                # This should not happen but protect against it
                 break
 
             # Add to sorted list and update for next iteration
@@ -473,24 +640,78 @@ class SpotifyPlaylistSorter:
             remaining_ids.remove(next_track_id)
             current_id = next_track_id
             logger.debug("Added: %s (Score: %.2f)", next_track.get("Track", current_id), scores.loc[next_track_idx])
-
-        original_ids_set = set(self.original_track_order) if self.original_track_order else set()
-        missing_from_sort = original_ids_set - set(sorted_ids)
-
-        if missing_from_sort and self.original_track_order:
-            logger.warning("Sort finished, but %s tracks that had data were not placed.", len(missing_from_sort))
-            missing_tracks_ordered = [tid for tid in self.original_track_order if tid in missing_from_sort]
-            logger.info("Appending %s tracks that were not placed during sorting.", len(missing_tracks_ordered))
-            sorted_ids.extend(missing_tracks_ordered)
-        elif len(sorted_ids) < len(initial_sortable_ids):
-            logger.warning(
-                "Sorting ended with %s tracks, but started with %s sortable tracks.",
-                len(sorted_ids),
-                len(initial_sortable_ids),
-            )
-
-        logger.info("Playlist sorting complete. Final track count: %s", len(sorted_ids))
+            
         return sorted_ids
+
+    def _sort_playlist_beam(self, start_track_id: str, beam_width: int = 50) -> list[str]:
+        """Sort playlist using Beam Search algorithm for higher quality transitions.
+        
+        Maintains top 'beam_width' paths at each step to find a better global order.
+        """
+        # Create a quick lookup dictionary for all track data to avoid slow DataFrame access
+        # Using 'records' orient would lose the ID if not careful, but since ID is a col, we can map ID -> record
+        track_lookup = self.tracks_data.set_index('id').to_dict('index')
+        # Add ID back into the dict values because calculate_transition_score might (or might not) use it
+        # but it's safer for general use.
+        for tid, data in track_lookup.items():
+            data['id'] = tid
+            
+        all_ids = set(track_lookup.keys())
+        num_tracks = len(all_ids)
+        
+        # Beam state: (cumulative_score, [path_of_ids], {set_of_visited_ids})
+        # Initialize beam with anchor track
+        current_beam = [(0.0, [start_track_id], {start_track_id})]
+        
+        # Iterate until all tracks are placed
+        # We need to place (num_tracks - 1) more tracks
+        for step in range(num_tracks - 1):
+            all_candidates = []
+            
+            # For each path in the current beam, extend it
+            for score, path, visited in current_beam:
+                last_track_id = path[-1]
+                last_track_data = track_lookup[last_track_id]
+                
+                potential_next_tracks = []
+                
+                # Calculate transition score to ALL unvisited tracks
+                for next_id in all_ids:
+                    if next_id in visited:
+                        continue
+                        
+                    next_track_data = track_lookup[next_id]
+                    trans_score = self.calculate_transition_score(last_track_data, next_track_data)
+                    potential_next_tracks.append((trans_score, next_id))
+                
+                if not potential_next_tracks:
+                    continue
+                    
+                # Optimization: Only keep top N extensions per path to avoid explosion
+                # Sort by transition score descending
+                potential_next_tracks.sort(key=lambda x: x[0], reverse=True)
+                
+                # Keep top 5 best next steps for this specific path
+                top_next_steps = potential_next_tracks[:5]
+                
+                for step_score, step_id in top_next_steps:
+                    new_total_score = score + step_score
+                    new_path = path + [step_id]
+                    new_visited = visited | {step_id}
+                    all_candidates.append((new_total_score, new_path, new_visited))
+            
+            if not all_candidates:
+                logger.warning("Beam search could not find any valid extensions at step %s.", step)
+                break
+                
+            # Prune the beam: keep top 'beam_width' paths based on total score
+            # Sort by cumulative score descending
+            all_candidates.sort(key=lambda x: x[0], reverse=True)
+            current_beam = all_candidates[:beam_width]
+            
+        # Return the path of the highest scoring candidate
+        best_path = current_beam[0][1]
+        return best_path
 
     def compare_playlists(self, sorted_ids: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Compare original (scraped order) and sorted playlist."""

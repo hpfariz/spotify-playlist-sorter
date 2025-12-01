@@ -381,6 +381,15 @@ def main() -> None:
                         "Choose a playlist to sort:", options=list(playlist_options.keys())
                     )
 
+                    # Data Source Selection
+                    data_source = st.radio(
+                        "Select Data Source:",
+                        options=["songdata.io", "chosic.com"],
+                        index=1,
+                        help="Chosic usually provides more accurate data but requires simulating a browser interaction.",
+                        horizontal=True,
+                    )
+
                     if selected_playlist:
                         playlist_id = playlist_options[selected_playlist]
 
@@ -395,9 +404,9 @@ def main() -> None:
                             st.session_state.transitions = None
 
                         if st.button("Load Playlist Data"):
-                            with st.spinner("Loading playlist data from Spotify and songdata.io..."):
+                            with st.spinner(f"Loading playlist data from Spotify and {data_source}..."):
                                 sorter = SpotifyPlaylistSorter(playlist_id, sp)
-                                tracks_data = sorter.load_playlist()
+                                tracks_data = sorter.load_playlist(source=data_source)
 
                                 if tracks_data is not None and not tracks_data.empty:
                                     st.session_state.tracks_data = tracks_data
@@ -471,7 +480,7 @@ def main() -> None:
             # Display playlist info
             playlist_name = st.session_state.sorter.playlist_name
             st.markdown(
-                f"**Playlist:** {playlist_name} &nbsp; |  &nbsp;  **Tracks with complete data:** {len(st.session_state.tracks_data)}"
+                f"**Playlist:** {playlist_name}   |     **Tracks with complete data:** {len(st.session_state.tracks_data)}"
             )
 
             st.divider()
@@ -504,11 +513,21 @@ def main() -> None:
                 anchor_track_id = track_options[selected_anchor]
                 st.session_state.anchor_track_id = anchor_track_id
 
+                # Optimization Mode Selection
+                sort_mode = st.radio(
+                    "Optimization Mode:",
+                    options=["Fast (Greedy)", "High Quality (Beam Search)"],
+                    index=0,
+                    help="Fast mode sorts instantly. High Quality mode takes longer but finds better transitions across the entire playlist.",
+                    horizontal=True,
+                )
+
                 # Sort button
                 button_label = "Re-sort Playlist" if st.session_state.get("sorted_ids") else "Sort Playlist"
                 if st.button(button_label):
-                    with st.spinner("Sorting playlist based on optimal transitions..."):
-                        sorted_ids = st.session_state.sorter.sort_playlist(anchor_track_id)
+                    method = "greedy" if "Fast" in sort_mode else "beam"
+                    with st.spinner(f"Sorting playlist using {sort_mode} algorithm..."):
+                        sorted_ids = st.session_state.sorter.sort_playlist(anchor_track_id, method=method)
 
                         if sorted_ids:
                             st.session_state.sorted_ids = sorted_ids

@@ -9,3 +9,5 @@ build/
 __pycache__
 audio_files/
 .ruff_cache
+chosic-before.html
+chosic-after.html
