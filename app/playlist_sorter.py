@@ -18,6 +18,7 @@ from constants import (
     API_BATCH_SIZE,
     BPM_GOOD_THRESHOLD,
     BPM_MEDIUM_THRESHOLD,
+    BPM_MAX_DIFFERENCE,
     CAMELOT_MAX_NUMBER,
     CAMELOT_MIN_NUMBER,
     DATA_ROW_THRESHOLD,
@@ -123,7 +124,6 @@ class SpotifyPlaylistSorter:
                 page.click("#analyze")
 
                 # Wait for the results table
-                # The table ID is #tracks-table based on provided HTML
                 try:
                     logger.info("Waiting for results table...")
                     page.wait_for_selector("#tracks-table tbody tr", state="visible", timeout=60000)
@@ -174,7 +174,7 @@ class SpotifyPlaylistSorter:
                 else:
                     track_name = cols[1].text.strip()
 
-                # Remove checkbox text if caught (rare but possible depending on HTML structure)
+                # Remove checkbox text if caught
                 if " " in track_name and len(track_name) > 1:
                      track_name = track_name.replace("Check to delete", "").strip()
 
@@ -234,17 +234,14 @@ class SpotifyPlaylistSorter:
         try:
             with sync_playwright() as p:
                 logger.info("Launching System Chrome...")
-                # CHANGE 1: Use channel="chrome" to use your real installed browser
-                # CHANGE 2: Add argument to start maximized
                 browser = p.chromium.launch(
                     headless=False,
-                    channel="chrome",  # Uses actual Google Chrome (or try "msedge" if you don't have Chrome)
+                    channel="chrome", 
                     args=["--disable-blink-features=AutomationControlled", "--start-maximized"]
                 )
                 
-                # CHANGE 3: Remove manual User-Agent and Viewport to avoid fingerprint mismatches
                 context = browser.new_context(
-                    viewport=None,  # Let the browser decide the size
+                    viewport=None,
                     no_viewport=True
                 )
                 
@@ -279,11 +276,10 @@ class SpotifyPlaylistSorter:
         # Parse the content with BeautifulSoup
         soup = BeautifulSoup(content, "html.parser")
         
-        # ... (Rest of the function remains exactly the same) ...
         table = cast("Optional[Tag]", soup.find("table", {"id": "table_chart"}))
         if not table:
             logger.error("Could not find the track table (id='table_chart') on the page.")
-            # ... continue with the rest of your parsing logic ...
+            # Fallback
             table = cast("Optional[Tag]", soup.find("table", {"class": "table"}))
             if not table:
                 logger.error("Could not find the track table by class either.")
@@ -333,11 +329,11 @@ class SpotifyPlaylistSorter:
                 energy_tag = cast("Optional[Tag]", row_tag.find("td", {"class": "table_energy"}))
                 energy = energy_tag.text.strip() if energy_tag else None
 
-                # Popularity is often in 'table_data' but might need specific identification
+                # Popularity
                 all_data_tags = row_tag.find_all("td", {"class": "table_data"})
                 popularity = None
                 if len(all_data_tags) > DATA_ROW_THRESHOLD:
-                    # Use a pattern matching approach instead of a lambda function
+                    # Use a pattern matching approach
                     date_pattern = re.compile(r"[-/]")
                     release_date_tag = cast(
                         "Optional[Tag]",
@@ -354,7 +350,7 @@ class SpotifyPlaylistSorter:
                         if prev_sibling:
                             popularity = prev_sibling.text.strip()
 
-                # Spotify ID is usually in a data-src attribute
+                # Spotify ID
                 spotify_link_cell = cast("Optional[Tag]", row_tag.find("td", {"id": "spotify_obj"}))
                 spotify_id = None
                 if spotify_link_cell and "data-src" in spotify_link_cell.attrs:
@@ -392,9 +388,9 @@ class SpotifyPlaylistSorter:
 
         # --- Data Cleaning and Type Conversion ---
         try:
-            # Convert relevant columns to numeric, coercing errors to NaN
+            # Convert relevant columns to numeric
             track_df["BPM"] = pd.to_numeric(track_df["BPM"], errors="coerce")
-            # Energy from songdata.io might be 1-10 scale or 0-1. Let's assume 0-1 for now.
+            # Energy
             raw_energy = pd.to_numeric(track_df["Energy"], errors="coerce")
             if raw_energy.max() > 1.0:
                 logger.warning("Detected Energy values > 1. Assuming 1-10 scale and normalizing to 0-1.")
@@ -404,13 +400,10 @@ class SpotifyPlaylistSorter:
 
             track_df["Popularity"] = pd.to_numeric(track_df["Popularity"], errors="coerce")
 
-            # Validate Camelot format (e.g., '1A', '12B')
+            # Validate Camelot format
             track_df["Camelot"] = track_df["Camelot"].str.upper()
             valid_camelot_mask = track_df["Camelot"].str.match(r"^[1-9]A$|^1[0-2]A$|^[1-9]B$|^1[0-2]B$", na=False)
-            invalid_camelot = track_df[~valid_camelot_mask]["Camelot"].unique()
-            if len(invalid_camelot) > 0:
-                logger.warning("Found potentially invalid Camelot keys: %s. Replacing with NaN.", invalid_camelot)
-                track_df.loc[~valid_camelot_mask, "Camelot"] = np.nan
+            track_df.loc[~valid_camelot_mask, "Camelot"] = np.nan
 
         except Exception:
             logger.exception("Error during data type conversion")
@@ -422,7 +415,7 @@ class SpotifyPlaylistSorter:
         """Load playlist name from Spotify and track data by scraping."""
         logger.info("Loading playlist metadata for: %s using %s", self.playlist_id, source)
         try:
-            # Get playlist name from Spotify (more reliable than scraping)
+            # Get playlist name from Spotify
             playlist_info = self.sp.playlist(self.playlist_id, fields="name")
             self.playlist_name = playlist_info["name"]
             logger.info("Playlist Name (from Spotify): '%s'", self.playlist_name)
@@ -430,7 +423,7 @@ class SpotifyPlaylistSorter:
             logger.warning("Failed to get playlist name from Spotify: %s. Will proceed without it.", e)
             self.playlist_name = f"Playlist {self.playlist_id}"
 
-        # Scrape track data based on selected source
+        # Scrape track data
         scraped_data = None
         if source == "chosic.com":
             scraped_data = self._scrape_chosic()
@@ -450,7 +443,7 @@ class SpotifyPlaylistSorter:
             "Using original track order based on %s table (%s tracks).", source, len(self.original_track_order)
         )
 
-        # Ensure required columns exist even if scraping missed some
+        # Ensure required columns exist
         for col in ["id", "Camelot", "BPM", "Energy"]:
             if col not in self.tracks_data.columns:
                 logger.error("Required column '%s' not found in scraped data.", col)
@@ -475,7 +468,7 @@ class SpotifyPlaylistSorter:
 
     def calculate_transition_score(self, track1: pd.Series | dict[str, Any], track2: pd.Series | dict[str, Any]) -> float:
         """Calculate a transition score between two tracks based on key, BPM, and energy."""
-        # Get track data (handle both Series and dict)
+        # Get track data
         key1 = track1.get("Camelot")
         key2 = track2.get("Camelot")
         bpm1 = track1.get("BPM")
@@ -483,77 +476,91 @@ class SpotifyPlaylistSorter:
         energy1 = track1.get("Energy")
         energy2 = track2.get("Energy")
 
-        # Key compatibility score (highest weight)
+        # --- Key Compatibility Score ---
+        # Key is crucial. If incompatible, score should be zero to act as a penalty multiplier later.
         key_score = 0.0
         key_compatible = False
-        key_multiplier = 1.0  # Full weight
 
         if pd.isna(key1) or pd.isna(key2):
-            # If either key is missing, reduce weight but don't penalize completely
-            key_multiplier = 0.5
-            if not pd.isna(key1) and key1 not in self.camelot_map:
-                logger.debug("Key %s not in camelot map for score calc.", key1)
+            # Missing key data reduces confidence but shouldn't be a hard 0 if we want to rely on BPM
+            key_score = 0.5 
         else:
             key1_str = str(key1)
             key2_str = str(key2)
             if key1_str in self.camelot_map:
                 key_compatible = key2_str in self.camelot_map[key1_str]
 
-        # Perfect match (same key) is slightly better than compatible keys
-        if not pd.isna(key1) and key1 == key2:
-            key_score = 1.0
-        elif key_compatible:
-            key_score = 0.9  # Very good but not perfect
-        else:
-            key_score = 0.1  # Poor key compatibility
+            if key1 == key2:
+                key_score = 1.0
+            elif key_compatible:
+                # Neighbor keys are acceptable but slightly less perfect than exact match
+                key_score = 0.8
+            else:
+                # Incompatible keys get 0.0. This will be used as a penalty multiplier.
+                key_score = 0.0
 
-        # BPM score - closer is better, within 5 BPM is great
+        # --- BPM Score ---
+        # BPM difference needs strict penalties for large gaps.
         bpm_score = 0.0
+        bpm_diff = 0.0
         if not pd.isna(bpm1) and not pd.isna(bpm2):
             try:
-                # Convert BPM values to float
                 bpm1_val = float(bpm1)
                 bpm2_val = float(bpm2)
                 if bpm1_val > 0 and bpm2_val > 0:
                     bpm_diff = abs(bpm1_val - bpm2_val)
-                    if bpm_diff <= BPM_GOOD_THRESHOLD:
+                    
+                    if bpm_diff <= BPM_GOOD_THRESHOLD:  # <= 5
                         bpm_score = 1.0
-                    elif bpm_diff <= BPM_MEDIUM_THRESHOLD:
-                        bpm_score = 0.7
+                    elif bpm_diff <= BPM_MEDIUM_THRESHOLD:  # <= 10
+                        bpm_score = 0.8
+                    elif bpm_diff <= BPM_MAX_DIFFERENCE:  # <= 16 (Defined in constants)
+                        # Linearly scale down score from 0.8 to 0.0 as diff goes from 10 to 16
+                        # This ensures that a diff of 15 still gets a very low score compared to 10
+                        ratio = (bpm_diff - BPM_MEDIUM_THRESHOLD) / (BPM_MAX_DIFFERENCE - BPM_MEDIUM_THRESHOLD)
+                        bpm_score = 0.8 * (1.0 - ratio)
                     else:
-                        # Gradually scale down as BPM difference increases
-                        bpm_score = max(0, 1 - (bpm_diff - BPM_MEDIUM_THRESHOLD) / 20)
+                        # Massive BPM difference = 0 score. This will be used as a penalty multiplier.
+                        bpm_score = 0.0
             except (ValueError, TypeError):
-                # Handle case where BPM cannot be converted to float
                 logger.debug("Cannot convert BPM to float for scoring: %s, %s", bpm1, bpm2)
 
-        # Energy flow score - slight increase is good, big jumps are bad
+        # --- Energy Flow Score ---
         energy_score = 0.0
         if not pd.isna(energy1) and not pd.isna(energy2):
             try:
-                # Convert energy values to float
                 energy1_val = float(energy1)
                 energy2_val = float(energy2)
-                energy_diff = energy2_val - energy1_val  # Positive for increasing energy
-                # Small energy increases are ideal
+                energy_diff = energy2_val - energy1_val
+                
                 if 0 <= energy_diff <= ENERGY_SMALL_INCREASE_MAX:
                     energy_score = 1.0
-                # Small decreases or moderate increases are ok
                 elif (
                     ENERGY_SMALL_DECREASE_MIN <= energy_diff < 0
                     or ENERGY_SMALL_INCREASE_MAX < energy_diff <= ENERGY_MODERATE_INCREASE_MAX
                 ):
                     energy_score = 0.7
-                # Big jumps are scored lower
                 else:
                     energy_score = max(0, 1 - abs(energy_diff) / ENERGY_SCALING_FACTOR)
             except (ValueError, TypeError):
-                # Handle case where energy cannot be converted to float
                 logger.debug("Cannot convert Energy to float for scoring: %s, %s", energy1, energy2)
 
-        # Weight the scores and apply the key multiplier
-        # Key is weighted most heavily since harmonic compatibility is paramount
-        return key_score * 0.5 * key_multiplier + bpm_score * 0.3 + energy_score * 0.2
+        # --- Final Score Calculation ---
+        # Base weighted score (Original weights: Key 0.5, BPM 0.3, Energy 0.2)
+        total_score = (key_score * 0.5) + (bpm_score * 0.3) + (energy_score * 0.2)
+
+        # --- Hard Penalties (Multipliers) ---
+        # If BPM difference is unacceptably high (score 0), heavily penalize the total.
+        # This prevents a "perfect key match" from saving a track with +30 BPM difference.
+        if bpm_score == 0.0:
+            total_score *= 0.1
+
+        # If Key is incompatible (score 0), heavily penalize the total.
+        # This prevents a "perfect BPM match" from saving a track with clashing keys.
+        if key_score == 0.0 and not (pd.isna(key1) or pd.isna(key2)):
+            total_score *= 0.1
+
+        return total_score
 
     def sort_playlist(self, start_track_id: str, method: str = "greedy") -> list[str]:
         """Sort the playlist using transition scores, starting from anchor.
@@ -581,7 +588,7 @@ class SpotifyPlaylistSorter:
         else:
              sorted_ids = self._sort_playlist_greedy(start_track_id)
 
-        # Handle tracks that were filtered out or not placed (e.g., in original but not in sort result)
+        # Handle tracks that were filtered out or not placed
         original_ids_set = set(self.original_track_order) if self.original_track_order else set()
         missing_from_sort = original_ids_set - set(sorted_ids)
 
@@ -602,7 +609,6 @@ class SpotifyPlaylistSorter:
         sorted_ids = [current_id]
         remaining_ids = set(sortable_tracks["id"].tolist())
         remaining_ids.remove(current_id)
-        initial_sortable_ids = remaining_ids.copy()
 
         while remaining_ids:
             # Get current track data
@@ -622,9 +628,6 @@ class SpotifyPlaylistSorter:
                     scores[idx] = np.nan
 
             if scores.empty or scores.isna().all():
-                logger.warning(
-                    "Could not calculate valid scores from %s. Stopping sort.", current_track.get("Track", current_id)
-                )
                 break
 
             # Get next track with highest score
@@ -644,15 +647,8 @@ class SpotifyPlaylistSorter:
         return sorted_ids
 
     def _sort_playlist_beam(self, start_track_id: str, beam_width: int = 50) -> list[str]:
-        """Sort playlist using Beam Search algorithm for higher quality transitions.
-        
-        Maintains top 'beam_width' paths at each step to find a better global order.
-        """
-        # Create a quick lookup dictionary for all track data to avoid slow DataFrame access
-        # Using 'records' orient would lose the ID if not careful, but since ID is a col, we can map ID -> record
+        """Sort playlist using Beam Search algorithm for higher quality transitions."""
         track_lookup = self.tracks_data.set_index('id').to_dict('index')
-        # Add ID back into the dict values because calculate_transition_score might (or might not) use it
-        # but it's safer for general use.
         for tid, data in track_lookup.items():
             data['id'] = tid
             
@@ -660,22 +656,17 @@ class SpotifyPlaylistSorter:
         num_tracks = len(all_ids)
         
         # Beam state: (cumulative_score, [path_of_ids], {set_of_visited_ids})
-        # Initialize beam with anchor track
         current_beam = [(0.0, [start_track_id], {start_track_id})]
         
-        # Iterate until all tracks are placed
-        # We need to place (num_tracks - 1) more tracks
         for step in range(num_tracks - 1):
             all_candidates = []
             
-            # For each path in the current beam, extend it
             for score, path, visited in current_beam:
                 last_track_id = path[-1]
                 last_track_data = track_lookup[last_track_id]
                 
                 potential_next_tracks = []
                 
-                # Calculate transition score to ALL unvisited tracks
                 for next_id in all_ids:
                     if next_id in visited:
                         continue
@@ -687,7 +678,6 @@ class SpotifyPlaylistSorter:
                 if not potential_next_tracks:
                     continue
                     
-                # Optimization: Only keep top N extensions per path to avoid explosion
                 # Sort by transition score descending
                 potential_next_tracks.sort(key=lambda x: x[0], reverse=True)
                 
@@ -701,37 +691,29 @@ class SpotifyPlaylistSorter:
                     all_candidates.append((new_total_score, new_path, new_visited))
             
             if not all_candidates:
-                logger.warning("Beam search could not find any valid extensions at step %s.", step)
                 break
                 
-            # Prune the beam: keep top 'beam_width' paths based on total score
-            # Sort by cumulative score descending
+            # Prune the beam
             all_candidates.sort(key=lambda x: x[0], reverse=True)
             current_beam = all_candidates[:beam_width]
             
-        # Return the path of the highest scoring candidate
         best_path = current_beam[0][1]
         return best_path
 
     def compare_playlists(self, sorted_ids: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Compare original (scraped order) and sorted playlist."""
         if self.tracks_data is None or self.tracks_data.empty or not self.original_track_order:
-            logger.error("Cannot compare playlists: Data not loaded or original order missing.")
             return pd.DataFrame(), pd.DataFrame()
 
-        # Check if we have valid IDs to work with
         valid_original_ids = [tid for tid in self.original_track_order if tid in self.tracks_data["id"].to_numpy()]
         valid_sorted_ids = [tid for tid in sorted_ids if tid in self.tracks_data["id"].to_numpy()]
 
         if not valid_original_ids or not valid_sorted_ids:
-            logger.error("No valid track data found for comparison after filtering.")
             return pd.DataFrame(), pd.DataFrame()
 
-        # Create DataFrames for the two orderings
         original_df = pd.DataFrame(index=range(len(valid_original_ids)))
         sorted_df = pd.DataFrame(index=range(len(valid_sorted_ids)))
 
-        # Populate columns with track data
         for df, id_list in [(original_df, valid_original_ids), (sorted_df, valid_sorted_ids)]:
             id_col, track_col, artist_col, camelot_col, bpm_col, energy_col = [], [], [], [], [], []
 
@@ -759,7 +741,6 @@ class SpotifyPlaylistSorter:
     def get_transition_analysis(self, sorted_ids: list[str]) -> list[dict[str, Any]]:
         """Generate analysis of the transitions in the sorted playlist."""
         if self.tracks_data is None or self.tracks_data.empty:
-            logger.warning("No track data to analyze transitions.")
             return []
 
         valid_ids = [tid for tid in sorted_ids if tid in self.tracks_data["id"].to_numpy()]
@@ -799,7 +780,6 @@ class SpotifyPlaylistSorter:
                 "energy2": energy2,
             }
 
-            # Skip this transition if critical data is missing
             if pd.isna(key1) or pd.isna(key2):
                 transition["message"] = "Missing key information, cannot analyze compatibility"
                 transitions.append(transition)
@@ -810,36 +790,30 @@ class SpotifyPlaylistSorter:
                 transitions.append(transition)
                 continue
 
-            # Check key compatibility
             key_compatible = False
             perfect_key_match = key1 == key2
 
             if not pd.isna(key1) and str(key1) in self.camelot_map:
                 key_compatible = str(key2) in self.camelot_map[str(key1)]
 
-            # Calculate BPM difference
             bpm_diff = None
             if not pd.isna(bpm1) and not pd.isna(bpm2):
                 try:
                     bpm_diff = abs(float(bpm1) - float(bpm2))
                 except (ValueError, TypeError):
-                    logger.debug("Cannot convert BPM to float for analysis: %s, %s", bpm1, bpm2)
+                    pass
 
-            # Calculate energy difference
             energy_diff = None
             if not pd.isna(energy1) and not pd.isna(energy2):
                 try:
                     energy_diff = float(energy2) - float(energy1)
                 except (ValueError, TypeError):
-                    logger.debug("Cannot convert Energy to float for analysis: %s, %s", energy1, energy2)
+                    pass
 
-            # Add compatibility details
             transition["key_compatible"] = key_compatible
             transition["perfect_key_match"] = perfect_key_match
             transition["bpm_diff"] = bpm_diff
             transition["energy_diff"] = energy_diff
-
-            # Calculate overall transition score
             transition["score"] = self.calculate_transition_score(track1_data, track2_data)
 
             transitions.append(transition)
@@ -850,18 +824,13 @@ class SpotifyPlaylistSorter:
         """Get Spotify URIs for track IDs, using the API to ensure accuracy."""
         uri_map = {}
 
-        # Process in batches of 50 to avoid hitting API rate limits
         for i in range(0, len(track_ids), API_BATCH_SIZE):
             batch_ids = track_ids[i : i + API_BATCH_SIZE]
             try:
-                # Fetch full track details to ensure we have correct URIs
                 tracks_details = self.sp.tracks(batch_ids)["tracks"]
-
                 for track in tracks_details:
                     if track and "id" in track and "uri" in track:
                         uri_map[track["id"]] = track["uri"]
-                    elif track and track["id"]:
-                        logger.warning("Could not find URI for track ID: %s", track["id"])
             except Exception:
                 logger.exception("Failed to fetch track details batch (starting index %s)", i)
             time.sleep(0.5)
@@ -883,7 +852,6 @@ class SpotifyPlaylistSorter:
         track_uris = [uri_map[track_id] for track_id in sorted_ids if track_id in uri_map]
 
         if not track_uris:
-            logger.error("No valid track URIs could be fetched for the sorted IDs. Cannot update playlist.")
             return False, "No valid track URIs could be fetched"
 
         if len(track_uris) != len(sorted_ids):
@@ -897,19 +865,60 @@ class SpotifyPlaylistSorter:
 
         try:
             self.sp.playlist_replace_items(self.playlist_id, track_uris[:100])
-            logger.info("Replaced/set first %s tracks.", min(len(track_uris), 100))
-
             for i in range(100, len(track_uris), 100):
                 batch = track_uris[i : i + 100]
                 self.sp.playlist_add_items(self.playlist_id, batch)
-                logger.info("Added batch of %s tracks (starting index %s).", len(batch), i)
                 time.sleep(1)
 
-            logger.info("Successfully updated playlist '%s' order on Spotify!", self.playlist_name)
             return True, f"Successfully updated playlist '{self.playlist_name}' with {len(track_uris)} tracks"
 
         except Exception as e:
             error_msg = str(e)
             logger.exception("Failed to update Spotify playlist: %s", error_msg)
-            logger.exception("Check API permissions (scope), rate limits, and playlist ownership.")
             return False, f"Failed to update playlist: {error_msg}"
+
+    def create_sorted_playlist(self, sorted_ids: list[str], new_name: str) -> tuple[bool, str]:
+        """Create a new playlist with the sorted tracks."""
+        if not sorted_ids:
+            logger.error("No sorted track IDs provided to create playlist.")
+            return False, "No sorted track IDs provided"
+        if self.tracks_data is None or self.tracks_data.empty:
+            logger.error("No track data available to map IDs to URIs.")
+            return False, "No track data available"
+
+        logger.info("Fetching URIs for %s sorted tracks...", len(sorted_ids))
+        uri_map = self._get_track_uris(sorted_ids)
+        track_uris = [uri_map[track_id] for track_id in sorted_ids if track_id in uri_map]
+
+        if not track_uris:
+            logger.error("No valid track URIs could be fetched. Cannot create playlist.")
+            return False, "No valid track URIs could be fetched"
+
+        try:
+            # Get current user ID
+            user_id = self.sp.current_user()["id"]
+            logger.info("Creating new playlist '%s' for user %s", new_name, user_id)
+            
+            # Create the new playlist
+            new_playlist = self.sp.user_playlist_create(
+                user=user_id,
+                name=new_name,
+                public=False, # Default to private
+                description=f"Sorted version of {self.playlist_name} generated by Spotify Playlist Sorter"
+            )
+            new_playlist_id = new_playlist["id"]
+            
+            # Add tracks in batches (Spotify API limit is 100 tracks per request)
+            for i in range(0, len(track_uris), 100):
+                batch = track_uris[i : i + 100]
+                self.sp.playlist_add_items(new_playlist_id, batch)
+                logger.info("Added batch of %s tracks to new playlist (starting index %s).", len(batch), i)
+                time.sleep(0.5) # Slight delay to respect API limits
+
+            logger.info("Successfully created playlist '%s'!", new_name)
+            return True, f"Successfully created new playlist '{new_name}' with {len(track_uris)} tracks"
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.exception("Failed to create new playlist: %s", error_msg)
+            return False, f"Failed to create playlist: {error_msg}"

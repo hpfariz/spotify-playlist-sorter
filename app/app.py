@@ -680,20 +680,50 @@ def main() -> None:
                         st.warning("Visual chart could not be displayed due to missing or invalid data.")
 
                 # Update playlist button
-                st.markdown("<h2 class='sub-header'>Update Spotify Playlist</h2>", unsafe_allow_html=True)
-                st.warning(
-                    "⚠️ This will replace the current order of your playlist on Spotify. "
-                    "Make sure you're happy with the sorted order before proceeding."
+                # Save Playlist Section
+                st.markdown("<h2 class='sub-header'>Save Sorted Playlist</h2>", unsafe_allow_html=True)
+                
+                # Option selection
+                save_option = st.radio(
+                    "Choose how to save:",
+                    options=["Create New Playlist", "Overwrite Existing Playlist"],
+                    index=0, # Default to Create New for safety
+                    horizontal=True
                 )
 
-                if st.button("Update Playlist on Spotify", type="primary"):
-                    with st.spinner("Updating playlist on Spotify..."):
-                        success, message = st.session_state.sorter.update_spotify_playlist(st.session_state.sorted_ids)
-
-                        if success:
-                            st.markdown(f"<div class='success-box'>✅ {message}</div>", unsafe_allow_html=True)
+                if save_option == "Create New Playlist":
+                    default_name = f"{st.session_state.sorter.playlist_name} (Sorted)"
+                    new_playlist_name = st.text_input("New Playlist Name", value=default_name)
+                    
+                    if st.button("Create Playlist", type="primary"):
+                        if not new_playlist_name.strip():
+                            st.error("Please enter a name for the new playlist.")
                         else:
-                            st.markdown(f"<div class='error-box'>❌ {message}</div>", unsafe_allow_html=True)
+                            with st.spinner(f"Creating playlist '{new_playlist_name}' on Spotify..."):
+                                success, message = st.session_state.sorter.create_sorted_playlist(
+                                    st.session_state.sorted_ids, 
+                                    new_playlist_name
+                                )
+
+                                if success:
+                                    st.markdown(f"<div class='success-box'>✅ {message}</div>", unsafe_allow_html=True)
+                                else:
+                                    st.markdown(f"<div class='error-box'>❌ {message}</div>", unsafe_allow_html=True)
+                
+                else: # Overwrite Existing Playlist
+                    st.warning(
+                        "⚠️ This will **replace** the current order of your original playlist on Spotify. "
+                        "This action cannot be undone via this app."
+                    )
+
+                    if st.button("Overwrite Original Playlist", type="primary"):
+                        with st.spinner("Updating playlist on Spotify..."):
+                            success, message = st.session_state.sorter.update_spotify_playlist(st.session_state.sorted_ids)
+
+                            if success:
+                                st.markdown(f"<div class='success-box'>✅ {message}</div>", unsafe_allow_html=True)
+                            else:
+                                st.markdown(f"<div class='error-box'>❌ {message}</div>", unsafe_allow_html=True)
         else:
             # Instructions when no playlist is loaded
             st.markdown("<h2 class='sub-header'>How It Works</h2>", unsafe_allow_html=True)
