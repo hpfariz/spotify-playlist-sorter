@@ -40,6 +40,7 @@ T = TypeVar("T")
 
 # Constants for transition analysis
 MIN_TRANSITION_COUNT = 2
+ENERGY_BRIDGE_THRESHOLD = 0.4  # Max energy diff allowed for harmonic bridges
 
 
 class SpotifyPlaylistSorter:
@@ -528,17 +529,26 @@ class SpotifyPlaylistSorter:
 
         # --- Energy Flow Score ---
         energy_score = 0.0
+        energy_diff_val = 1.0 # Default high diff
+        energy_diff = 0.0
+        
         if not pd.isna(energy1) and not pd.isna(energy2):
             try:
                 energy1_val = float(energy1)
                 energy2_val = float(energy2)
+                energy_diff_val = abs(energy1_val - energy2_val)
                 energy_diff = energy2_val - energy1_val
                 
                 if 0 <= energy_diff <= ENERGY_SMALL_INCREASE_MAX:
                     energy_score = 1.0
                 elif (
                     ENERGY_SMALL_DECREASE_MIN <= energy_diff < 0
-                    or ENERGY_SMALL_INCREASE_MAX < energy_diff <= ENERGY_MODERATE_INCREASE_MAX
+                ):
+                    # NEW: Boost score for small energy drops to allow "cooling down"
+                    # Old score was 0.7. New score 0.9 makes it almost as good as an increase.
+                    energy_score = 0.9 
+                elif (
+                    ENERGY_SMALL_INCREASE_MAX < energy_diff <= ENERGY_MODERATE_INCREASE_MAX
                 ):
                     energy_score = 0.7
                 else:
@@ -550,32 +560,46 @@ class SpotifyPlaylistSorter:
         # If the BPM is perfect (score 1.0), we consider this a high-quality mix 
         # regardless of Key. We start with a high base score and apply light penalties.
         if bpm_score == 1.0:
-            # Base score for a perfect beatmatch, ignoring key initially
+            # Base score for a perfect beatmatch
             total_score = 0.85
             
             # Add small bonus for energy match
             total_score += (energy_score * 0.15)
             
-            # Apply moderate penalty if keys are incompatible.
-            # 0.8 multiplier -> 0.85 * 0.8 = 0.68 (Good "Energy Mix" score)
+            # Key Mismatch Penalty
             if key_score == 0.0:
-                total_score *= 0.8
+                # 0.55 penalty ensures a Key Clash (without key compatibility) 
+                # can never beat a decent transition that DOES have key compatibility.
+                # 0.85 * 0.55 = ~0.46 (Low score)
+                total_score *= 0.55
             
-            # No further penalties applied here. This ensures perfect BPM matches stay high.
+            # VIBE CHECK: If Energy is completely mismatched, penalize further
+            if energy_score < 0.3:
+                 total_score *= 0.85
+
             return total_score
 
         # --- Standard Weighted Score (for non-perfect BPM) ---
         total_score = (key_score * 0.4) + (bpm_score * 0.4) + (energy_score * 0.2)
+        
+        # --- NEW: "Sugar Rush" Penalty ---
+        # If we jump up in energy too fast (e.g. 0.4 -> 0.9), penalize it.
+        # This forces the algorithm to group low-energy tracks together instead of 
+        # jumping out of them immediately.
+        if energy_diff > 0.4:
+            total_score *= 0.9
 
         # --- Standard Penalties ---
         # 1. BPM Deal-Breaker: If BPM diff is huge (>20), punish severely.
         if bpm_score == 0.0:
             # Check for "Harmonic Bridge": Compatible Key + Genre Switch (Large BPM jump)
-            # If keys are compatible (>=0.8) and it's a big jump, give it a "Bridge Score" (~0.5-0.6)
-            if key_score >= 0.8 and bpm_diff <= 40:
-                total_score = 0.6  # Fixed score for a harmonic bridge
+            # We enforce Energy Stability to avoid "Ambient -> House" jumps
+            energy_stable = energy_diff_val <= ENERGY_BRIDGE_THRESHOLD
+            
+            if key_score >= 0.8 and bpm_diff <= 40 and energy_stable:
+                total_score = 0.6  # Fixed score for a SAFE harmonic bridge
             else:
-                total_score *= 0.01 # Unmixable
+                total_score *= 0.01 # Unmixable or unstable energy
                 
         # 2. BPM Rough Patch: If BPM diff is 12-20, penalize significantly.
         elif bpm_diff > BPM_MAX_DIFFERENCE: 
@@ -587,7 +611,7 @@ class SpotifyPlaylistSorter:
 
         return total_score
 
-    def sort_playlist(self, start_track_id: str, method: str = "greedy") -> list[str]:
+    def sort_playlist(self, start_track_id: str, method: str = "beam") -> list[str]:
         """Sort the playlist using transition scores, starting from anchor.
         
         Args:
@@ -609,7 +633,8 @@ class SpotifyPlaylistSorter:
         logger.info("Starting sort with anchor track ID: %s using %s method", start_track_id, method)
 
         if method == "beam":
-             sorted_ids = self._sort_playlist_beam(start_track_id)
+             # Increased beam width to 400 to prevent 'painting into a corner' with isolated tracks
+             sorted_ids = self._sort_playlist_beam(start_track_id, beam_width=400)
         else:
              sorted_ids = self._sort_playlist_greedy(start_track_id)
 
@@ -671,7 +696,7 @@ class SpotifyPlaylistSorter:
             
         return sorted_ids
 
-    def _sort_playlist_beam(self, start_track_id: str, beam_width: int = 100) -> list[str]:
+    def _sort_playlist_beam(self, start_track_id: str, beam_width: int = 400) -> list[str]:
         """Sort playlist using Beam Search algorithm for higher quality transitions."""
         track_lookup = self.tracks_data.set_index('id').to_dict('index')
         for tid, data in track_lookup.items():
