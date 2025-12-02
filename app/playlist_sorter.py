@@ -477,50 +477,51 @@ class SpotifyPlaylistSorter:
         energy2 = track2.get("Energy")
 
         # --- Key Compatibility Score ---
-        # Key is crucial. If incompatible, score should be zero to act as a penalty multiplier later.
         key_score = 0.0
-        key_compatible = False
-
+        
         if pd.isna(key1) or pd.isna(key2):
-            # Missing key data reduces confidence but shouldn't be a hard 0 if we want to rely on BPM
             key_score = 0.5 
         else:
             key1_str = str(key1)
             key2_str = str(key2)
+            key_compatible = False
             if key1_str in self.camelot_map:
                 key_compatible = key2_str in self.camelot_map[key1_str]
 
             if key1 == key2:
                 key_score = 1.0
             elif key_compatible:
-                # Neighbor keys are acceptable but slightly less perfect than exact match
                 key_score = 0.8
             else:
-                # Incompatible keys get 0.0. This will be used as a penalty multiplier.
                 key_score = 0.0
 
         # --- BPM Score ---
-        # BPM difference needs strict penalties for large gaps.
         bpm_score = 0.0
         bpm_diff = 0.0
+        
+        # New Feature: Double/Half Time Detection
+        # This fixes issues where 95 BPM -> 190 BPM scores 0.00 despite being perfectly mixable
         if not pd.isna(bpm1) and not pd.isna(bpm2):
             try:
-                bpm1_val = float(bpm1)
-                bpm2_val = float(bpm2)
-                if bpm1_val > 0 and bpm2_val > 0:
-                    bpm_diff = abs(bpm1_val - bpm2_val)
+                b1 = float(bpm1)
+                b2 = float(bpm2)
+                if b1 > 0 and b2 > 0:
+                    # Calculate differences for standard, half-time, and double-time mixing
+                    diff_std = abs(b1 - b2)
+                    diff_double = abs((b1 * 2) - b2)
+                    diff_half = abs((b1 / 2) - b2)
+                    
+                    # Use the best matching BPM interpretation
+                    bpm_diff = min(diff_std, diff_double, diff_half)
                     
                     if bpm_diff <= BPM_GOOD_THRESHOLD:  # <= 5
                         bpm_score = 1.0
                     elif bpm_diff <= BPM_MEDIUM_THRESHOLD:  # <= 10
                         bpm_score = 0.8
-                    elif bpm_diff <= BPM_MAX_DIFFERENCE:  # <= 16 (Defined in constants)
-                        # Linearly scale down score from 0.8 to 0.0 as diff goes from 10 to 16
-                        # This ensures that a diff of 15 still gets a very low score compared to 10
-                        ratio = (bpm_diff - BPM_MEDIUM_THRESHOLD) / (BPM_MAX_DIFFERENCE - BPM_MEDIUM_THRESHOLD)
+                    elif bpm_diff <= 20:  # Allow mixes up to 20 BPM diff but penalize
+                        ratio = (bpm_diff - BPM_MEDIUM_THRESHOLD) / (20 - BPM_MEDIUM_THRESHOLD)
                         bpm_score = 0.8 * (1.0 - ratio)
                     else:
-                        # Massive BPM difference = 0 score. This will be used as a penalty multiplier.
                         bpm_score = 0.0
             except (ValueError, TypeError):
                 logger.debug("Cannot convert BPM to float for scoring: %s, %s", bpm1, bpm2)
@@ -545,20 +546,44 @@ class SpotifyPlaylistSorter:
             except (ValueError, TypeError):
                 logger.debug("Cannot convert Energy to float for scoring: %s, %s", energy1, energy2)
 
-        # --- Final Score Calculation ---
-        # Base weighted score (Original weights: Key 0.5, BPM 0.3, Energy 0.2)
-        total_score = (key_score * 0.5) + (bpm_score * 0.3) + (energy_score * 0.2)
+        # --- BPM RESCUE: High Score Override ---
+        # If the BPM is perfect (score 1.0), we consider this a high-quality mix 
+        # regardless of Key. We start with a high base score and apply light penalties.
+        if bpm_score == 1.0:
+            # Base score for a perfect beatmatch, ignoring key initially
+            total_score = 0.85
+            
+            # Add small bonus for energy match
+            total_score += (energy_score * 0.15)
+            
+            # Apply moderate penalty if keys are incompatible.
+            # 0.8 multiplier -> 0.85 * 0.8 = 0.68 (Good "Energy Mix" score)
+            if key_score == 0.0:
+                total_score *= 0.8
+            
+            # No further penalties applied here. This ensures perfect BPM matches stay high.
+            return total_score
 
-        # --- Hard Penalties (Multipliers) ---
-        # If BPM difference is unacceptably high (score 0), heavily penalize the total.
-        # This prevents a "perfect key match" from saving a track with +30 BPM difference.
+        # --- Standard Weighted Score (for non-perfect BPM) ---
+        total_score = (key_score * 0.4) + (bpm_score * 0.4) + (energy_score * 0.2)
+
+        # --- Standard Penalties ---
+        # 1. BPM Deal-Breaker: If BPM diff is huge (>20), punish severely.
         if bpm_score == 0.0:
-            total_score *= 0.1
-
-        # If Key is incompatible (score 0), heavily penalize the total.
-        # This prevents a "perfect BPM match" from saving a track with clashing keys.
+            # Check for "Harmonic Bridge": Compatible Key + Genre Switch (Large BPM jump)
+            # If keys are compatible (>=0.8) and it's a big jump, give it a "Bridge Score" (~0.5-0.6)
+            if key_score >= 0.8 and bpm_diff <= 40:
+                total_score = 0.6  # Fixed score for a harmonic bridge
+            else:
+                total_score *= 0.01 # Unmixable
+                
+        # 2. BPM Rough Patch: If BPM diff is 12-20, penalize significantly.
+        elif bpm_diff > BPM_MAX_DIFFERENCE: 
+            total_score *= 0.5
+            
+        # 3. Key Mismatch: If keys clash AND BPM is not perfect, apply penalty.
         if key_score == 0.0 and not (pd.isna(key1) or pd.isna(key2)):
-            total_score *= 0.1
+            total_score *= 0.5
 
         return total_score
 
@@ -646,7 +671,7 @@ class SpotifyPlaylistSorter:
             
         return sorted_ids
 
-    def _sort_playlist_beam(self, start_track_id: str, beam_width: int = 50) -> list[str]:
+    def _sort_playlist_beam(self, start_track_id: str, beam_width: int = 100) -> list[str]:
         """Sort playlist using Beam Search algorithm for higher quality transitions."""
         track_lookup = self.tracks_data.set_index('id').to_dict('index')
         for tid, data in track_lookup.items():
@@ -795,6 +820,9 @@ class SpotifyPlaylistSorter:
 
             if not pd.isna(key1) and str(key1) in self.camelot_map:
                 key_compatible = str(key2) in self.camelot_map[str(key1)]
+            
+            if perfect_key_match:
+                key_compatible = True
 
             bpm_diff = None
             if not pd.isna(bpm1) and not pd.isna(bpm2):

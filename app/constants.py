@@ -7,7 +7,7 @@ SCORE_MEDIUM_THRESHOLD = 0.4
 # BPM difference thresholds
 BPM_GOOD_THRESHOLD = 5
 BPM_MEDIUM_THRESHOLD = 10
-BPM_MAX_DIFFERENCE = 12  # New constant: BPM differences higher than this incur heavy penalties
+BPM_MAX_DIFFERENCE = 16  # New constant: BPM differences higher than this incur heavy penalties
 
 # Energy thresholds
 ENERGY_SMALL_INCREASE_MAX = 0.15
